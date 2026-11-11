@@ -31,6 +31,9 @@ NOTIFY_PARTNER = os.getenv("NOTIFY_PARTNER", "0") == "1"
 B_EXP, B_INC, B_REP = "➖ Расход", "➕ Доход", "📊 Отчёт"
 B_BUD, B_HIST, B_CATS = "💰 Бюджет", "🧾 История", "🗂 Категории"
 
+MENU_TEXTS = {B_EXP, B_INC, B_REP, B_BUD, B_HIST, B_CATS}
+NOT_MENU = ~F.text.in_(MENU_TEXTS)  # кнопки меню всегда работают, даже посреди ввода
+
 MENU = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text=B_EXP), KeyboardButton(text=B_INC)],
               [KeyboardButton(text=B_REP), KeyboardButton(text=B_BUD)],
@@ -133,7 +136,7 @@ async def start_tx(msg: Message, state: FSMContext):
     await msg.answer(f"Сумма {word}? Можно с комментарием, например <code>12,50 кофе</code>")
 
 
-@router.message(Tx.amount, F.text)
+@router.message(Tx.amount, F.text, NOT_MENU)
 async def got_amount(msg: Message, state: FSMContext):
     parsed = db.parse_amount(msg.text.lstrip("+-"))
     if not parsed:
@@ -351,7 +354,7 @@ async def limit_pick(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
-@router.message(Lim.amount, F.text)
+@router.message(Lim.amount, F.text, NOT_MENU)
 async def limit_set(msg: Message, state: FSMContext):
     text = msg.text.strip()
     parsed = (0, "") if text == "0" else db.parse_amount(text)
@@ -386,7 +389,7 @@ async def addcat(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
-@router.message(Cat.name, F.text)
+@router.message(Cat.name, F.text, NOT_MENU)
 async def addcat_name(msg: Message, state: FSMContext):
     text = re.sub(r"[<>&]", "", msg.text).strip()[:40]
     if not text:
