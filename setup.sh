@@ -22,7 +22,7 @@ mkdir -p "$DATA"
 
 if [ ! -f "$APP/.env" ]; then
   echo
-  read -rp "Вставь токен бота от BotFather и нажми Enter: " TOKEN
+  read -rsp "Вставь токен бота от BotFather (символы не видны) и нажми Enter: " TOKEN; echo
   cat > "$APP/.env" <<EOF
 BOT_TOKEN=$TOKEN
 ALLOWED_IDS=

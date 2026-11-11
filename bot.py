@@ -19,6 +19,7 @@ from aiogram.types import (BufferedInputFile, CallbackQuery, KeyboardButton, Mes
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import db
+import receipt
 import reports
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -125,6 +126,7 @@ async def ask_category(msg: Message, state: FSMContext, kind: str, amount: int, 
 @router.message(F.text == B_INC)
 async def start_tx(msg: Message, state: FSMContext):
     kind = "expense" if msg.text == B_EXP else "income"
+    await state.clear()
     await state.set_state(Tx.amount)
     await state.update_data(kind=kind)
     word = "расхода" if kind == "expense" else "дохода"
@@ -137,8 +139,9 @@ async def got_amount(msg: Message, state: FSMContext):
     if not parsed:
         await msg.answer("Не понял сумму. Пример: <code>12,50</code> или <code>40 бензин</code>")
         return
-    kind = (await state.get_data()).get("kind", "expense")
-    await ask_category(msg, state, kind, *parsed)
+    data = await state.get_data()
+    amount, comment = parsed
+    await ask_category(msg, state, data.get("kind", "expense"), amount, comment or data.get("comment", ""))
 
 
 @router.callback_query(F.data.startswith("cat:"))
@@ -152,13 +155,18 @@ async def got_category(cb: CallbackQuery, state: FSMContext, bot: Bot):
     if "amount" not in data:
         await cb.message.edit_text("Запись устарела — введи сумму ещё раз.")
         return await cb.answer()
-    cat = db.category(int(value))
-    tx_id = db.add_tx(data["kind"], data["amount"], cat["id"], cb.from_user.id, data.get("comment", ""))
+    await save_tx(cb, bot, state, data, db.category(int(value)))
+
+
+async def save_tx(cb: CallbackQuery, bot: Bot, state: FSMContext, data: dict, cat):
+    tx_id = db.add_tx(data["kind"], data["amount"], cat["id"], cb.from_user.id,
+                      data.get("comment", ""), when=data.get("when"))
     await state.clear()
 
     sign = "➖" if data["kind"] == "expense" else "➕"
     note = f" · {html.escape(data['comment'])}" if data.get("comment") else ""
-    text = f"✅ {sign} <b>{db.fmt(data['amount'])}</b> — {cat['emoji']} {cat['name']}{note}"
+    day = f" · {data['when'][8:10]}.{data['when'][5:7]}" if data.get("when") else ""
+    text = f"✅ {sign} <b>{db.fmt(data['amount'])}</b> — {cat['emoji']} {cat['name']}{note}{day}"
     kb = InlineKeyboardBuilder()
     kb.button(text="↩️ Отменить", callback_data=f"undo:{tx_id}")
     await cb.message.edit_text(text, reply_markup=kb.as_markup())
@@ -167,9 +175,10 @@ async def got_category(cb: CallbackQuery, state: FSMContext, bot: Bot):
     recipients = set(db.users()) & ALLOWED
     if NOTIFY_PARTNER:
         for uid in recipients - {cb.from_user.id}:
-            await safe_send(bot, uid, f"{cb.from_user.first_name}: {text[2:]}")
+            await safe_send(bot, uid, f"{html.escape(cb.from_user.first_name or '')}: {text[2:]}")
     if data["kind"] == "expense":
-        for alert in db.limit_alerts(cat["id"], data["amount"]):
+        month = data["when"][:7] if data.get("when") else None
+        for alert in db.limit_alerts(cat["id"], data["amount"], month):
             for uid in recipients:
                 await safe_send(bot, uid, alert)
 
@@ -190,6 +199,71 @@ async def undo(cb: CallbackQuery):
     else:
         await cb.message.edit_reply_markup(reply_markup=None)
     await cb.answer()
+
+
+# ---------- чеки по фото ----------
+
+def receipt_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Сохранить", callback_data="rcpt:save")
+    kb.button(text="🗂 Другая категория", callback_data="rcpt:cat")
+    kb.button(text="✏️ Исправить сумму", callback_data="rcpt:amount")
+    kb.button(text="✖️ Отмена", callback_data="cat:cancel")
+    kb.adjust(1, 2, 1)
+    return kb.as_markup()
+
+
+@router.message(F.photo | (F.document & F.document.mime_type.startswith("image/")))
+async def receipt_photo(msg: Message, state: FSMContext, bot: Bot):
+    if not receipt.enabled():
+        return await msg.answer("Чтение чеков не настроено: нужен ключ Claude API на сервере.")
+    await state.clear()
+    wait = await msg.answer("🧾 Читаю чек…")
+    if msg.photo:
+        file_id, mime = msg.photo[-1].file_id, "image/jpeg"
+    else:
+        file_id, mime = msg.document.file_id, msg.document.mime_type
+    buf = io.BytesIO()
+    await bot.download(file_id, destination=buf)
+    try:
+        r = await receipt.parse(buf.getvalue(), mime, db.categories("expense"))
+    except receipt.NotAReceipt as e:
+        return await wait.edit_text(f"🤔 {html.escape(str(e))}\nМожно ввести вручную: <code>12,50 кофе</code>")
+    except Exception:  # noqa: BLE001
+        logging.exception("Чек не прочитан")
+        return await wait.edit_text("😕 Не получилось прочитать чек. Попробуй сфотографировать ровнее "
+                                    "или введи сумму вручную: <code>12,50 кофе</code>")
+    cat = db.category(r["category_id"])
+    await state.set_state(Tx.category)
+    await state.update_data(kind="expense", amount=r["amount"], comment=r["merchant"],
+                            when=r["when"], cat_id=cat["id"])
+    lines = [f"🧾 <b>Чек</b>", "",
+             f"➖ <b>{db.fmt(r['amount'])}</b>",
+             f"🏪 {html.escape(r['merchant'] or '—')}",
+             f"📅 {r['date_label']}",
+             f"{cat['emoji']} {cat['name']}"]
+    if r.get("note"):
+        lines += ["", f"<i>{html.escape(r['note'])}</i>"]
+    await wait.edit_text("\n".join(lines), reply_markup=receipt_kb())
+
+
+@router.callback_query(F.data.startswith("rcpt:"))
+async def receipt_action(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    action = cb.data.split(":")[1]
+    data = await state.get_data()
+    if "amount" not in data:
+        await cb.message.edit_text("Чек устарел — пришли фото ещё раз.")
+        return await cb.answer()
+    if action == "save":
+        return await save_tx(cb, bot, state, data, db.category(data["cat_id"]))
+    if action == "cat":
+        await cb.message.edit_reply_markup(reply_markup=cat_keyboard("expense"))
+        return await cb.answer("Выбери категорию")
+    if action == "amount":
+        await state.set_state(Tx.amount)
+        await cb.message.edit_reply_markup(reply_markup=None)
+        await cb.message.answer("Какая сумма? Например <code>47,30</code>")
+        return await cb.answer()
 
 
 # ---------- отчёты ----------
@@ -362,6 +436,7 @@ async def export(msg: Message):
 
 @router.message(StateFilter(None, Tx.category), F.text.regexp(r"^\s*[+\-]?\s*€?\s*\d"))
 async def quick(msg: Message, state: FSMContext):
+    await state.clear()
     text = msg.text.strip()
     kind = "income" if text.startswith("+") else "expense"
     parsed = db.parse_amount(text.lstrip("+-"))

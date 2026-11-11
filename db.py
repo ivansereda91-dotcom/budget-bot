@@ -159,8 +159,13 @@ def hide_category(cat_id: int) -> None:
 
 # ---------- операции ----------
 
-def add_tx(kind: str, amount: int, cat_id: int, user_id: int, comment: str = "") -> int:
+def add_tx(kind: str, amount: int, cat_id: int, user_id: int, comment: str = "",
+           when: str | None = None) -> int:
+    """when — дата чека 'YYYY-MM-DD'; по умолчанию сейчас."""
     t = now()
+    if when:
+        d = datetime.fromisoformat(when)
+        t = t.replace(year=d.year, month=d.month, day=d.day)
     with connect() as c:
         cur = c.execute(
             "INSERT INTO transactions(kind, amount, category_id, user_id, comment, created_at, month) "
