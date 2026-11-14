@@ -34,8 +34,18 @@ def prev_month_key(key: str) -> str:
     return f"{y - 1}-12" if m == 1 else f"{y}-{m - 1:02d}"
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """`with connect() as c:` — коммит и сразу закрытие соединения (иначе копятся открытые файлы)."""
+
+    def __exit__(self, *exc):
+        try:
+            return super().__exit__(*exc)
+        finally:
+            self.close()
+
+
 def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, factory=_ClosingConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
